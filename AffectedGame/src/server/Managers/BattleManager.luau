@@ -419,7 +419,69 @@ local function concludeResult(result)
 	return result
 end
 
--- Valida e executa a ação; ofensivas miram o time adversário, suporte mira o próprio usuário
+-- Resolve uma ação em área numa linha só do log: quem foi atingido/curado, críticos, esquivas, status e quem caiu
+local function concludeGroup(results)
+	local first = results[1]
+	local action = first.action
+	local hit, crits, dodged, killed, cured = {}, {}, {}, {}, {}
+	local statusTargets, statusName = 0, nil
+
+	for _, result in results do
+		local name = result.target.name
+
+		if result.dodged then
+			table.insert(dodged, name)
+		else
+			table.insert(hit, name)
+		end
+		if result.critical then
+			table.insert(crits, name)
+		end
+		if result.statusApplied then
+			statusTargets += 1
+			statusName = result.statusApplied
+		end
+		if #result.cured > 0 then
+			table.insert(cured, name)
+		end
+		if result.killed then
+			table.insert(killed, name)
+			if not result.target.isPlayerTeam then
+				fadeModel(result.target.model)
+			end
+		end
+	end
+
+	local text = string.format("%s usou %s", first.source.name, action.displayName or action.id)
+	if #hit > 0 then
+		text ..= ((action.effectType or "Damage") == "Damage" and " e atingiu " or " em ") .. table.concat(hit, ", ")
+	end
+	text ..= "."
+
+	if #crits > 0 then
+		text ..= " Crítico em " .. table.concat(crits, ", ") .. "!"
+	end
+	if #dodged > 0 then
+		text ..= " " .. table.concat(dodged, ", ") .. " esquivou!"
+	end
+	if statusTargets > 0 then
+		text ..= string.format(" %s %s!", statusTargets == #results and "Todos ficaram" or (statusTargets .. " ficaram"), statusName)
+	end
+	if #cured > 0 then
+		text ..= " Efeitos removidos de " .. table.concat(cured, ", ") .. "."
+	end
+	if first.energyGained > 0 then
+		text ..= string.format(" (+%d energia)", first.energyGained)
+	end
+	if #killed > 0 then
+		text ..= " " .. table.concat(killed, ", ") .. " caiu!"
+	end
+
+	broadcastLog(text)
+	return results
+end
+
+-- Valida e executa a ação: em área (targetGroup) atinge um time inteiro; ofensivas miram um inimigo; suporte mira o usuário
 local function performAction(character, actionId: string, targetSpec, force: boolean?)
 	local action = Registry.Get("Actions", actionId)
 	if not action then
@@ -428,6 +490,17 @@ local function performAction(character, actionId: string, targetSpec, force: boo
 
 	if not force and not table.find(character.actions, action.id) then
 		return nil, "Você não conhece " .. (action.displayName or action.id) .. "."
+	end
+
+	if action.targetGroup == "Allies" or action.targetGroup == "Enemies" then
+		local sameTeam = action.targetGroup == "Allies"
+		local onPlayerSide = character.isPlayerTeam == sameTeam
+		local results, reason = character:UseActionOnGroup(action, aliveOf(onPlayerSide and battle.players or battle.enemies), rng)
+		if not results then
+			return nil, reason
+		end
+
+		return concludeGroup(results)
 	end
 
 	local target = character

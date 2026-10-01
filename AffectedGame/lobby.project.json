@@ -14,9 +14,6 @@
                 "CharacterCreated": {
                     "$className": "RemoteEvent"
                 },
-                "BattleAction": {
-                    "$className": "RemoteEvent"
-                },
                 "GetPublicParties": {
                     "$className": "RemoteFunction"
                 },
@@ -38,11 +35,11 @@
             }
         },
         "ServerScriptService": {
-        "$path": "src/server"
+            "$path": "src/server"
         },
         "StarterPlayer": {
             "StarterPlayerScripts": {
-                "$path": "src/client/lobby"
+                "$path": "src/client/Lobby"
             }
         },
         "Workspace": {

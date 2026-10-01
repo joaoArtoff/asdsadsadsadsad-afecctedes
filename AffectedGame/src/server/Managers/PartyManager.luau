@@ -1,622 +1,314 @@
--- SERVIÇOS
-
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
 
--- SHARED / REMOTES
-
 local Shared = ReplicatedStorage:WaitForChild("shared")
-
-local Remotes =
-	require(
-		Shared:WaitForChild("Remotes") :: ModuleScript
-	)
-
-local PlaceIds =
-	require(
-		Shared:WaitForChild("PlaceIds") :: ModuleScript
-	)
-
--- CONFIGURAÇÕES
-
-local GAMEPLAY_PLACE_ID = PlaceIds.Game
-
-local MAX_PLAYERS = 4
-
--- REMOTE FUNCTION
--- USADO PARA LISTAR AS PARTIES PÚBLICAS
-
-local GetPublicParties = Remotes.GetPublicParties
-
--- PARTY MANAGER
+local Remotes = require(Shared:WaitForChild("Remotes"))
+local PlaceIds = require(Shared:WaitForChild("PlaceIds"))
+local CharacterManager = require(script.Parent:WaitForChild("CharacterManager"))
 
 local PartyManager = {}
 
--- PARTIES
---
--- partyId ->
---
--- {
---     id = "party_123456",
---     leaderUserId = 123,
---     memberUserIds = {}
--- }
+-- Place de destino, tamanho máximo da party e tempo mínimo entre tentativas de iniciar
+local CONFIG = {
+	GamePlaceId = PlaceIds.Game,
+	MaxPlayers = 4,
+	StartCooldown = 3,
+}
 
+PartyManager.MAX_PLAYERS = CONFIG.MaxPlayers
+
+-- partyId -> { id, leaderUserId, memberUserIds, starting, lastStartAttempt }
 PartyManager.parties = {}
 
--- JOGADOR -> PARTY
---
 -- UserId -> partyId
-
 PartyManager.playerToParty = {}
 
--- GERAR ID DA PARTY
-
-local function generatePartyId()
-
+-- Gera um id de party que ainda não está em uso
+local function generatePartyId(): string
 	local id
-
 	repeat
-
-		id =
-			"party_"
-			..
-			tostring(
-				math.random(
-					100000,
-					999999
-				)
-			)
-
+		id = "party_" .. math.random(100000, 999999)
 	until not PartyManager.parties[id]
-
 	return id
-
 end
 
--- ENVIAR ATUALIZAÇÃO PARA TODOS
--- OS MEMBROS DA PARTY
+local function getPartyOf(robloxPlayer: Player)
+	local partyId = PartyManager.playerToParty[robloxPlayer.UserId]
+	return partyId and PartyManager.parties[partyId]
+end
 
-local function broadcastPartyUpdate(party)
+-- Dados que o client recebe: ids, líder, membros (nome, classe e feat), limite e se a partida já está iniciando
+local function serialize(party)
+	local members = {}
 
-	if not party then
-		return
+	for _, userId in party.memberUserIds do
+		local member = Players:GetPlayerByUserId(userId)
+		table.insert(members, {
+			userId = userId,
+			name = member and member.DisplayName or "Player",
+			classLabel = member and member:GetAttribute("CharacterClassLabel") or nil,
+			featLabel = member and member:GetAttribute("CharacterFeatLabel") or nil,
+		})
 	end
 
-	for _, userId in ipairs(
-		party.memberUserIds
-	) do
+	return {
+		partyId = party.id,
+		leaderUserId = party.leaderUserId,
+		memberUserIds = table.clone(party.memberUserIds),
+		members = members,
+		maxPlayers = CONFIG.MaxPlayers,
+		starting = party.starting == true,
+	}
+end
 
-		local robloxPlayer =
-			Players:GetPlayerByUserId(
-				userId
-			)
+-- Manda para um jogador o estado atual da party dele (nil = sem party), com uma mensagem opcional para a tela
+local function sendState(robloxPlayer: Player, message: string?)
+	local party = getPartyOf(robloxPlayer)
+	Remotes.PartyUpdated:FireClient(robloxPlayer, party and serialize(party) or nil, message)
+end
 
-		if robloxPlayer then
-
-			Remotes.PartyUpdated:FireClient(
-				robloxPlayer,
-				{
-					partyId =
-						party.id,
-
-					leaderUserId =
-						party.leaderUserId,
-
-					memberUserIds =
-						party.memberUserIds,
-				}
-			)
-
+local function broadcast(party, message: string?)
+	for _, userId in party.memberUserIds do
+		local member = Players:GetPlayerByUserId(userId)
+		if member then
+			sendState(member, message)
 		end
-
 	end
-
 end
 
--- RETORNAR PARTIES PÚBLICAS
-
+-- Lista pública do navegador de parties (parties que já estão iniciando não aparecem)
 local function getPublicParties()
+	local list = {}
 
-	local publicParties = {}
-
-	for partyId, party in pairs(
-		PartyManager.parties
-	) do
-
-		local leaderPlayer =
-			Players:GetPlayerByUserId(
-				party.leaderUserId
-			)
-
-		local leaderName =
-			"Player"
-
-		-- NOME DO LÍDER
-
-		if leaderPlayer then
-
-			leaderName =
-				leaderPlayer.DisplayName
-
+	for partyId, party in PartyManager.parties do
+		if not party.starting then
+			local leader = Players:GetPlayerByUserId(party.leaderUserId)
+			table.insert(list, {
+				partyId = partyId,
+				leaderUserId = party.leaderUserId,
+				leaderName = leader and leader.DisplayName or "Player",
+				memberCount = #party.memberUserIds,
+				maxPlayers = CONFIG.MaxPlayers,
+			})
 		end
-
-		-- ADICIONAR À LISTA
-
-		table.insert(
-			publicParties,
-			{
-				partyId =
-					partyId,
-
-				leaderUserId =
-					party.leaderUserId,
-
-				leaderName =
-					leaderName,
-
-				memberCount =
-					#party.memberUserIds,
-
-				maxPlayers =
-					MAX_PLAYERS,
-			}
-		)
-
 	end
 
-	return publicParties
+	table.sort(list, function(a, b)
+		return a.memberCount > b.memberCount
+	end)
 
+	return list
 end
 
--- CLIENT PEDE A LISTA DE PARTIES
-
-GetPublicParties.OnServerInvoke =
-	function()
-
-		return getPublicParties()
-
-	end
-
--- CRIAR PARTY
-
-local function onCreateParty(
-	robloxPlayer
-)
-
-	-- JOGADOR JÁ ESTÁ EM UMA PARTY
-
-	if PartyManager.playerToParty[
-		robloxPlayer.UserId
-	] then
-
-		warn(
-			"[PartyManager]",
-			robloxPlayer.Name,
-			"tentou criar uma Party, mas já está em uma."
-		)
-
+-- Cria uma party nova com o jogador como líder
+local function onCreateParty(robloxPlayer: Player)
+	if getPartyOf(robloxPlayer) then
+		sendState(robloxPlayer, "Você já está em uma party.")
 		return
-
 	end
-
-	-- GERAR PARTY
-
-	local partyId =
-		generatePartyId()
 
 	local party = {
-
-		id =
-			partyId,
-
-		leaderUserId =
-			robloxPlayer.UserId,
-
-		memberUserIds = {
-			robloxPlayer.UserId
-		},
-
+		id = generatePartyId(),
+		leaderUserId = robloxPlayer.UserId,
+		memberUserIds = { robloxPlayer.UserId },
+		starting = false,
+		lastStartAttempt = 0,
 	}
 
-	-- REGISTRAR PARTY
+	PartyManager.parties[party.id] = party
+	PartyManager.playerToParty[robloxPlayer.UserId] = party.id
 
-	PartyManager.parties[
-		partyId
-	] = party
-
-	PartyManager.playerToParty[
-		robloxPlayer.UserId
-	] = partyId
-
-	print(
-		"[PartyManager] Party criada:",
-		partyId,
-		"por",
-		robloxPlayer.Name
-	)
-
-	-- ATUALIZAR CLIENT
-
-	broadcastPartyUpdate(
-		party
-	)
-
+	print("[PartyManager] Party criada:", party.id, "por", robloxPlayer.Name)
+	broadcast(party, "Party criada! Chame seus amigos.")
 end
 
--- ENTRAR EM PARTY
-
-local function onJoinParty(
-	robloxPlayer,
-	partyId
-)
-
-	-- PROTEÇÃO
-
+-- Entra numa party existente, validando id, vaga e se a partida ainda não começou
+local function onJoinParty(robloxPlayer: Player, partyId)
 	if type(partyId) ~= "string" then
-
-		warn(
-			"[PartyManager] partyId inválido recebido de",
-			robloxPlayer.Name
-		)
-
 		return
-
 	end
 
-	-- ENCONTRAR PARTY
+	if getPartyOf(robloxPlayer) then
+		sendState(robloxPlayer, "Saia da sua party antes de entrar em outra.")
+		return
+	end
 
-	local party =
-		PartyManager.parties[
-			partyId
-		]
-
+	local party = PartyManager.parties[partyId]
 	if not party then
-
-		warn(
-			"[PartyManager] Party não encontrada:",
-			partyId
-		)
-
+		sendState(robloxPlayer, "Essa party não existe mais.")
 		return
-
 	end
 
-	-- PLAYER JÁ ESTÁ EM PARTY
-
-	if PartyManager.playerToParty[
-		robloxPlayer.UserId
-	] then
-
+	if party.starting then
+		sendState(robloxPlayer, "Essa party já está entrando na partida.")
 		return
-
 	end
 
-	-- PARTY CHEIA
-
-	if #party.memberUserIds
-		>= MAX_PLAYERS then
-
-		warn(
-			"[PartyManager] Party cheia:",
-			partyId
-		)
-
+	if #party.memberUserIds >= CONFIG.MaxPlayers then
+		sendState(robloxPlayer, "Essa party está cheia.")
 		return
-
 	end
 
-	-- ADICIONAR JOGADOR
+	table.insert(party.memberUserIds, robloxPlayer.UserId)
+	PartyManager.playerToParty[robloxPlayer.UserId] = party.id
 
-	table.insert(
-		party.memberUserIds,
-		robloxPlayer.UserId
-	)
-
-	PartyManager.playerToParty[
-		robloxPlayer.UserId
-	] = partyId
-
-	print(
-		"[PartyManager]",
-		robloxPlayer.Name,
-		"entrou na Party",
-		partyId
-	)
-
-	-- ATUALIZA TODOS
-
-	broadcastPartyUpdate(
-		party
-	)
-
+	print("[PartyManager]", robloxPlayer.Name, "entrou na party", party.id)
+	broadcast(party, robloxPlayer.DisplayName .. " entrou na party.")
 end
 
--- SAIR DA PARTY
-
-local function onLeaveParty(
-	robloxPlayer
-)
-
-	local userId =
-		robloxPlayer.UserId
-
-	-- ENCONTRAR PARTY DO JOGADOR
-
-	local partyId =
-		PartyManager.playerToParty[
-			userId
-		]
-
+-- Tira o jogador da party: apaga a party se esvaziar e passa a liderança se o líder sair
+local function removeFromParty(robloxPlayer: Player, notifyLeaver: boolean)
+	local userId = robloxPlayer.UserId
+	local partyId = PartyManager.playerToParty[userId]
 	if not partyId then
 		return
 	end
 
-	local party =
-		PartyManager.parties[
-			partyId
-		]
+	PartyManager.playerToParty[userId] = nil
+	local party = PartyManager.parties[partyId]
 
-	-- PARTY NÃO EXISTE MAIS
+	if party then
+		local index = table.find(party.memberUserIds, userId)
+		if index then
+			table.remove(party.memberUserIds, index)
+		end
+	end
+
+	if notifyLeaver then
+		sendState(robloxPlayer, "Você saiu da party.")
+	end
 
 	if not party then
-
-		PartyManager.playerToParty[
-			userId
-		] = nil
-
-		Remotes.PartyUpdated:FireClient(
-			robloxPlayer,
-			nil
-		)
-
 		return
-
 	end
 
-	-- REMOVER DA LISTA
-
-	for index, memberUserId in ipairs(
-		party.memberUserIds
-	) do
-
-		if memberUserId ==
-			userId then
-
-			table.remove(
-				party.memberUserIds,
-				index
-			)
-
-			break
-
-		end
-
-	end
-
-	-- REMOVER RELAÇÃO PLAYER -> PARTY
-
-	PartyManager.playerToParty[
-		userId
-	] = nil
-
-	-- AVISAR O CLIENT QUE ELE SAIU
-
-	Remotes.PartyUpdated:FireClient(
-		robloxPlayer,
-		nil
-	)
-
-	print(
-		"[PartyManager]",
-		robloxPlayer.Name,
-		"saiu da Party",
-		partyId
-	)
-
-	-- PARTY FICOU VAZIA
+	print("[PartyManager]", robloxPlayer.Name, "saiu da party", partyId)
 
 	if #party.memberUserIds == 0 then
-
-		PartyManager.parties[
-			partyId
-		] = nil
-
-		print(
-			"[PartyManager] Party removida:",
-			partyId
-		)
-
+		PartyManager.parties[partyId] = nil
+		print("[PartyManager] Party removida:", partyId)
 		return
-
 	end
 
-	-- LÍDER SAIU
-	-- PROMOVE O PRÓXIMO
-
-	if party.leaderUserId ==
-		userId then
-
-		party.leaderUserId =
-			party.memberUserIds[1]
-
-		print(
-			"[PartyManager] Novo líder:",
-			party.leaderUserId
-		)
-
+	local message = robloxPlayer.DisplayName .. " saiu da party."
+	if party.leaderUserId == userId then
+		party.leaderUserId = party.memberUserIds[1]
+		local newLeader = Players:GetPlayerByUserId(party.leaderUserId)
+		message ..= " " .. (newLeader and newLeader.DisplayName or "Outro jogador") .. " agora é o líder."
 	end
 
-	-- ATUALIZA QUEM FICOU
-
-	broadcastPartyUpdate(
-		party
-	)
-
+	broadcast(party, message)
 end
 
--- INICIAR PARTIDA
+local function onLeaveParty(robloxPlayer: Player)
+	local party = getPartyOf(robloxPlayer)
 
-local function onStartGame(
-	robloxPlayer
-)
-
-	-- ENCONTRAR PARTY
-
-	local partyId =
-		PartyManager.playerToParty[
-			robloxPlayer.UserId
-		]
-
-	if not partyId then
-
-		warn(
-			"[PartyManager] Jogador não está em Party."
-		)
-
+	if party and party.starting then
+		sendState(robloxPlayer, "A partida já está começando.")
 		return
-
 	end
 
-	local party =
-		PartyManager.parties[
-			partyId
-		]
+	removeFromParty(robloxPlayer, true)
+end
+
+-- Libera a party para tentar de novo quando o teleporte falhar
+local function failStart(party, reason: string)
+	party.starting = false
+	warn("[PartyManager] Falha ao iniciar a party", party.id, ":", reason)
+	broadcast(party, "Não foi possível iniciar a partida. Tente de novo.")
+end
+
+-- Só o líder inicia: teleporta todos juntos para um servidor reservado do Game, levando os dados da party
+local function onStartGame(robloxPlayer: Player)
+	local party = getPartyOf(robloxPlayer)
 
 	if not party then
+		sendState(robloxPlayer, "Você não está em uma party.")
 		return
 	end
 
-	-- SOMENTE O LÍDER
-
-	if party.leaderUserId
-		~= robloxPlayer.UserId then
-
-		warn(
-			"[PartyManager]",
-			robloxPlayer.Name,
-			"tentou iniciar sem ser líder."
-		)
-
+	if party.leaderUserId ~= robloxPlayer.UserId then
+		sendState(robloxPlayer, "Apenas o líder pode iniciar a partida.")
 		return
-
 	end
 
-	-- PEGAR PLAYERS DA PARTY
+	if party.starting or os.clock() - party.lastStartAttempt < CONFIG.StartCooldown then
+		return
+	end
 
-	local robloxPlayers = {}
+	if RunService:IsStudio() then
+		sendState(robloxPlayer, "O teleporte entre places não funciona no Studio. Publique e teste pelo Roblox.")
+		return
+	end
 
-	for _, userId in ipairs(
-		party.memberUserIds
-	) do
-
-		local member =
-			Players:GetPlayerByUserId(
-				userId
-			)
-
+	local members = {}
+	for _, userId in party.memberUserIds do
+		local member = Players:GetPlayerByUserId(userId)
 		if member then
-
-			table.insert(
-				robloxPlayers,
-				member
-			)
-
+			table.insert(members, member)
 		end
-
 	end
 
-	-- SEGURANÇA
-
-	if #robloxPlayers == 0 then
+	if #members == 0 then
 		return
 	end
 
-	-- SERVIDOR RESERVADO
+	party.starting = true
+	party.lastStartAttempt = os.clock()
+	broadcast(party, "Iniciando a partida...")
 
-	local options =
-		Instance.new(
-			"TeleportOptions"
-		)
+	-- Personagem escolhido por cada membro, lido no Game pelo RunManager (characters[UserId])
+	local characters = {}
+	for _, userId in party.memberUserIds do
+		characters[tostring(userId)] = CharacterManager.GetData(userId)
+	end
 
-	options.ShouldReserveServer =
-		true
-
-	-- DADOS DA PARTY PARA O PLACE DO GAME
-	-- O place do Game não conhece a party. O RunManager lê esse dado
-	-- pra saber quem decide nas telas de evento.
-
+	local options = Instance.new("TeleportOptions")
+	options.ShouldReserveServer = true
 	options:SetTeleportData({
-
-		partyId =
-			party.id,
-
-		leaderUserId =
-			party.leaderUserId,
-
-		memberUserIds =
-			party.memberUserIds,
-
+		partyId = party.id,
+		leaderUserId = party.leaderUserId,
+		memberUserIds = table.clone(party.memberUserIds),
+		characters = characters,
 	})
 
-	-- TELEPORTAR PARTY
+	print("[PartyManager] Teleportando", #members, "jogador(es) da party", party.id)
 
-	print(
-		"[PartyManager] Iniciando partida com",
-		#robloxPlayers,
-		"jogador(es). Líder:",
-		party.leaderUserId
-	)
-
-	local success, result =
-		pcall(function()
-
-			return TeleportService:TeleportAsync(
-				GAMEPLAY_PLACE_ID,
-				robloxPlayers,
-				options
-			)
-
-		end)
-
-	-- ERRO NO TELEPORT
-
-	if not success then
-
-		warn(
-			"[PartyManager] Falha ao teleportar Party",
-			party.id,
-			":",
-			tostring(result)
-		)
-
+	local ok, err = pcall(TeleportService.TeleportAsync, TeleportService, CONFIG.GamePlaceId, members, options)
+	if not ok then
+		failStart(party, tostring(err))
 	end
-
 end
 
--- PLAYER DESCONECTOU
+-- Falha de teleporte depois de iniciado (servidor cheio, place errado etc.) destrava a party
+TeleportService.TeleportInitFailed:Connect(function(robloxPlayer, result, errorMessage)
+	local party = getPartyOf(robloxPlayer)
+	if party and party.starting then
+		failStart(party, tostring(result) .. " " .. tostring(errorMessage))
+	end
+end)
 
-Players.PlayerRemoving:Connect(
-	onLeaveParty
-)
+Players.PlayerRemoving:Connect(function(robloxPlayer)
+	removeFromParty(robloxPlayer, false)
+end)
 
--- REMOTES
+-- Quando alguém troca de personagem, as vagas da party dele mostram a classe nova
+CharacterManager.Changed:Connect(function(robloxPlayer)
+	local party = getPartyOf(robloxPlayer)
+	if party then
+		broadcast(party)
+	end
+end)
 
-Remotes.CreateParty.OnServerEvent:Connect(
-	onCreateParty
-)
+Remotes.GetPublicParties.OnServerInvoke = function()
+	return getPublicParties()
+end
 
-Remotes.JoinParty.OnServerEvent:Connect(
-	onJoinParty
-)
-
-Remotes.LeaveParty.OnServerEvent:Connect(
-	onLeaveParty
-)
-
-Remotes.StartGame.OnServerEvent:Connect(
-	onStartGame
-)
+Remotes.CreateParty.OnServerEvent:Connect(onCreateParty)
+Remotes.JoinParty.OnServerEvent:Connect(onJoinParty)
+Remotes.LeaveParty.OnServerEvent:Connect(onLeaveParty)
+Remotes.StartGame.OnServerEvent:Connect(onStartGame)
 
 return PartyManager

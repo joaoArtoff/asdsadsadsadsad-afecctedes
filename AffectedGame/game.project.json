@@ -33,7 +33,7 @@
         },
         "StarterPlayer": {
             "StarterPlayerScripts": {
-                "$path": "src/client/battle"
+                "$path": "src/client/Battle"
             }
         },
         "Workspace": {

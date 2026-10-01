@@ -433,21 +433,8 @@ function Character:ComputeHeal(action)
 	return math.floor(amount + 0.5)
 end
 
--- Executa uma ação completa (custo, recarga, efeito principal, energia e status secundário) e devolve o resultado
-function Character:UseAction(action, target, rng)
-	local ok, reason = self:CanUse(action)
-	if not ok then
-		return nil, reason
-	end
-
-	target = target or self
-	self:SpendEnergy(action.energyCost or 0)
-	self.actionsRemaining -= 1
-
-	if (action.cooldown or 0) > 0 then
-		self.cooldowns[action.id] = action.cooldown
-	end
-
+-- Aplica o efeito de uma ação em um alvo (dano ou cura, status e remoção de efeitos); custo e recarga ficam fora
+local function applyToTarget(self, action, target, rng)
 	local result = {
 		action = action,
 		source = self,
@@ -457,6 +444,7 @@ function Character:UseAction(action, target, rng)
 		energyGained = 0,
 		dodged = false,
 		critical = false,
+		cured = {},
 	}
 
 	local effectType = action.effectType or "Damage"
@@ -469,18 +457,74 @@ function Character:UseAction(action, target, rng)
 		result.healed = target:Heal(self:ComputeHeal(action))
 	end
 
-	if action.energyGain then
-		result.energyGained = self:GainEnergy(action.energyGain)
-	end
-
 	local status = action.statusEffect
 	if status and target.isAlive and not result.dodged and (status.chance == nil or (rng or Random.new()):NextNumber() < status.chance) then
 		target:AddStatus(status.id, status)
 		result.statusApplied = status.displayName or status.id
 	end
 
+	for _, statusId in action.cure or {} do
+		local effect = target.statusEffects[statusId]
+		if effect then
+			table.insert(result.cured, effect.name or statusId)
+			target:RemoveStatus(statusId)
+		end
+	end
+
 	result.killed = not target.isAlive
 	return result
+end
+
+-- Paga o custo da ação uma única vez: energia, a ação do turno e a recarga
+local function payCost(self, action)
+	self:SpendEnergy(action.energyCost or 0)
+	self.actionsRemaining -= 1
+
+	if (action.cooldown or 0) > 0 then
+		self.cooldowns[action.id] = action.cooldown
+	end
+end
+
+-- Executa uma ação em um alvo (custo, recarga, efeito principal, energia e status) e devolve o resultado
+function Character:UseAction(action, target, rng)
+	local ok, reason = self:CanUse(action)
+	if not ok then
+		return nil, reason
+	end
+
+	payCost(self, action)
+	local result = applyToTarget(self, action, target or self, rng)
+
+	if action.energyGain then
+		result.energyGained = self:GainEnergy(action.energyGain)
+	end
+
+	return result
+end
+
+-- Executa uma ação em área (todos os aliados ou todos os inimigos): paga uma vez e aplica em cada alvo
+function Character:UseActionOnGroup(action, targets, rng)
+	local ok, reason = self:CanUse(action)
+	if not ok then
+		return nil, reason
+	end
+
+	if #targets == 0 then
+		return nil, "Nenhum alvo disponível."
+	end
+
+	payCost(self, action)
+
+	local results = {}
+	for _, target in targets do
+		table.insert(results, applyToTarget(self, action, target, rng))
+	end
+
+	if action.energyGain then
+		results[1].energyGained = self:GainEnergy(action.energyGain)
+	end
+
+	return results
 end
 
 -- Converte a definição de um item numa ação temporária, para reaproveitar todo o cálculo do UseAction
@@ -500,10 +544,11 @@ local function itemToAction(item)
 		canDodge = false,
 		energyGain = effect.energy,
 		statusEffect = effect.statusEffect,
+		cure = effect.cure,
 	}
 end
 
--- Usa um item (gasta a ação do turno como qualquer ataque) e depois remove os efeitos listados em "cure"
+-- Usa um item (gasta a ação do turno como qualquer ataque); a remoção de efeitos ("cure") vem junto da ação
 function Character:UseItem(item, target, rng)
 	local result, reason = self:UseAction(itemToAction(item), target or self, rng)
 	if not result then
@@ -511,16 +556,6 @@ function Character:UseItem(item, target, rng)
 	end
 
 	result.item = item
-	result.cured = {}
-
-	for _, statusId in (item.effect and item.effect.cure) or {} do
-		local effect = result.target.statusEffects[statusId]
-		if effect then
-			table.insert(result.cured, effect.name or statusId)
-			result.target:RemoveStatus(statusId)
-		end
-	end
-
 	return result
 end
 

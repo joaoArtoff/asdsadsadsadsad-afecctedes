@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
 
 local Characters = ReplicatedStorage:WaitForChild("shared"):WaitForChild("Characters")
 local PlayersFolder = Characters:WaitForChild("players")
@@ -19,18 +20,25 @@ local RunManager = {
 	CurrentScene = 0,
 	BattlesCleared = 0,
 	State = "Idle",
-	Gold = 10,
-	HealthPotion = 1,
 }
 
--- Nome da área (banner da interface), espera da party, pausa entre cenas e cura entre batalhas
+-- Nome da área (banner), espera da party (sem Lobby / com Lobby), pausa entre cenas e cura entre batalhas
 local CONFIG = {
 	AreaName = "Floresta",
 	PartyGraceTime = 4,
+	PartyWaitTimeout = 20,
 	SceneDelay = 3,
 	RestHealPercent = 0.25,
 
 	-- Itens com que cada jogador começa a run (se não vier inventário do Lobby)
+	-- Personagem usado ao testar o place do Game direto no Studio (sem vir do Lobby);
+	-- troque a classe/feat aqui para testar outras combinações
+	StudioCharacter = {
+		class = "bard",
+		race = "Human",
+		feats = { "cancao_de_guerra" },
+	},
+
 	StartingItems = {
 		HealthPotion = 2,
 		Antidote = 1,
@@ -45,30 +53,75 @@ local ENCOUNTERS = {
 	{ "Goblin", "Zombie", "Goblin" },
 }
 
--- Lê o TeleportData enviado pelo Lobby; aceita dados por jogador em characters[UserId] ou um bloco único
-local function readJoinData(robloxPlayer: Player)
+-- TeleportData bruto que o Lobby mandou (partyId, leaderUserId, memberUserIds e, no futuro, dados de cada personagem)
+local function getTeleportData(robloxPlayer: Player)
 	local ok, joinData = pcall(robloxPlayer.GetJoinData, robloxPlayer)
 	local data = ok and type(joinData) == "table" and joinData.TeleportData
+	return type(data) == "table" and data or nil
+end
 
-	if type(data) ~= "table" then
-		return nil
-	end
+-- Dados de personagem de um jogador: aceita characters[UserId] ou um bloco único
+local function readJoinData(robloxPlayer: Player)
+	local data = getTeleportData(robloxPlayer)
 
-	if type(data.characters) == "table" then
+	if data and type(data.characters) == "table" then
 		return data.characters[tostring(robloxPlayer.UserId)]
 	end
 
 	return data
 end
 
--- Registra o Character de um jogador na run (PlayerLite + classe/raça/feats vindos do Lobby)
+-- Espera a party inteira chegar do teleporte (cada membro chega num momento diferente), com tempo limite
+local function waitForParty(partyData)
+	local expected = partyData and partyData.memberUserIds
+	if type(expected) ~= "table" or #expected == 0 then
+		task.wait(CONFIG.PartyGraceTime)
+		return
+	end
+
+	local deadline = os.clock() + CONFIG.PartyWaitTimeout
+	while os.clock() < deadline do
+		local missing = 0
+		for _, userId in expected do
+			if not Players:GetPlayerByUserId(tonumber(userId) or 0) then
+				missing += 1
+			end
+		end
+
+		if missing == 0 then
+			return
+		end
+
+		task.wait(0.5)
+	end
+
+	warn("[RunManager] Nem todos os membros da party chegaram; começando mesmo assim.")
+end
+
+-- Passa o líder da party do Lobby para o EventManager (só ele escolhe nas telas de evento)
+local function applyPartyLeader(partyData)
+	local leaderId = partyData and tonumber(partyData.leaderUserId)
+	local leader = leaderId and Players:GetPlayerByUserId(leaderId)
+
+	EventManager.Leader = leader
+	if leader then
+		print("[RunManager] Líder da party:", leader.Name)
+	end
+end
+
+-- Registra o Character de um jogador na run (PlayerLite + classe/raça/feats vindos do Lobby ou do teste no Studio)
 function RunManager.AddPlayer(robloxPlayer: Player)
 	local existing = RunManager.ByUserId[robloxPlayer.UserId]
 	if existing then
 		return existing
 	end
 
-	local lite = PlayerLite.new(robloxPlayer.DisplayName, robloxPlayer):ApplyData(readJoinData(robloxPlayer))
+	local joinData = readJoinData(robloxPlayer)
+	if not joinData and RunService:IsStudio() then
+		joinData = CONFIG.StudioCharacter
+	end
+
+	local lite = PlayerLite.new(robloxPlayer.DisplayName, robloxPlayer):ApplyData(joinData)
 	local ok, character = pcall(PlayerCharacter.new, lite)
 
 	if not ok then
@@ -86,9 +139,9 @@ function RunManager.AddPlayer(robloxPlayer: Player)
 	RunManager.ByUserId[robloxPlayer.UserId] = character
 
 	print(string.format(
-		"[RunManager] %s entrou como %s (%s) - HP %d, ATK %.1f, INI %.1f",
-		character.name, tostring(character.classId), tostring(character.raceId),
-		character.stats.MaxHealth, character:GetStat("Attack"), character:GetStat("Initiative")
+		"[RunManager] %s entrou como %s (%s) feats: [%s] - HP %d, ATK %.1f, DEF %.1f, INI %.1f",
+		character.name, tostring(character.classId), tostring(character.raceId), table.concat(lite.feats, ", "),
+		character.stats.MaxHealth, character:GetStat("Attack"), character:GetStat("Defense"), character:GetStat("Initiative")
 	))
 
 	return character
@@ -221,11 +274,14 @@ function RunManager.Start()
 			Players.PlayerAdded:Wait()
 		end
 
-		task.wait(CONFIG.PartyGraceTime)
+		local partyData = getTeleportData(Players:GetPlayers()[1])
+		waitForParty(partyData)
 
 		for _, player in Players:GetPlayers() do
 			RunManager.AddPlayer(player)
 		end
+
+		applyPartyLeader(partyData)
 
 		RunManager.State = "Running"
 		SceneManager:StartRun()

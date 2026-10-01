@@ -2,7 +2,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local serverRoot = script.Parent
 local managersFolder = serverRoot:WaitForChild("Managers", 10)
 
-
 if not managersFolder then
 	error("[SERVER] Pasta Managers não encontrada.")
 end
@@ -10,6 +9,7 @@ end
 local Shared = ReplicatedStorage:WaitForChild("shared")
 local PlaceIds = require(Shared:WaitForChild("PlaceIds"))
 
+-- Carrega um manager com pcall para um erro num manager não derrubar o servidor inteiro
 local function loadManager(managerName: string)
 	local managerModule = managersFolder:WaitForChild(managerName, 10)
 
@@ -33,13 +33,8 @@ end
 local isGamePlace = game.PlaceId == PlaceIds.Game
 
 if isGamePlace then
-	--------------------------------------------------------------------
-	-- PLACE: GAME
-	--------------------------------------------------------------------
-
-	-- RunManager é o manager principal do Game: ele mesmo carrega os
-	-- outros managers (BattleManager, EventManager, SceneManager) e
-	-- começa a rodar a sequência de cenas da run assim que é requerido.
+	-- Place Game: o RunManager carrega BattleManager, EventManager e SceneManager
+	-- e começa a sequência de cenas da run assim que é requerido.
 	local RunManager = loadManager("RunManager")
 
 	if not RunManager then
@@ -48,9 +43,13 @@ if isGamePlace then
 
 	print("[SERVER] Place Game inicializado.")
 else
-	--------------------------------------------------------------------
-	-- PLACE: LOBBY
-	--------------------------------------------------------------------
+	-- Place Lobby: escolha de personagem e party. O CharacterManager vem antes
+	-- porque o PartyManager lê a escolha de cada membro na hora do teleporte.
+	local CharacterManager = loadManager("CharacterManager")
+
+	if not CharacterManager then
+		error("[SERVER] CharacterManager não conseguiu iniciar.")
+	end
 
 	local PartyManager = loadManager("PartyManager")
 
@@ -58,27 +57,24 @@ else
 		error("[SERVER] PartyManager não conseguiu iniciar.")
 	end
 
-	-- RunManager NÃO é carregado aqui: ele espera um BattleCenter que só
-	-- existe no place do Game (via BattleManager.Init), e agora também
-	-- roda a sequência inteira de cenas sozinho ao ser requerido -- não
-	-- faz sentido nenhum disso rodar enquanto os jogadores ainda estão
-	-- só montando a Party no Lobby.
-
+	-- Confere se os remotes do lobby existem (declarados no lobby.project.json)
 	local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 10)
 
 	if not remotesFolder then
 		warn("[SERVER] A pasta ReplicatedStorage.Remotes não foi criada.")
 	else
-		local requiredPartyRemotes = {
+		local requiredLobbyRemotes = {
 			"CreateParty",
 			"JoinParty",
 			"LeaveParty",
 			"StartGame",
 			"PartyUpdated",
 			"GetPublicParties",
+			"SubmitCharacter",
+			"CharacterCreated",
 		}
 
-		for _, remoteName in ipairs(requiredPartyRemotes) do
+		for _, remoteName in ipairs(requiredLobbyRemotes) do
 			if not remotesFolder:FindFirstChild(remoteName) then
 				warn("[SERVER] Remote FALTANDO:", remoteName)
 			end
@@ -86,5 +82,4 @@ else
 	end
 
 	print("[SERVER] Place Lobby inicializado.")
-
 end

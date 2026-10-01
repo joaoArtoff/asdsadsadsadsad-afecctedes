@@ -15,7 +15,7 @@ return {
 		ignoreDefense = true,
 		statusEffect = {
 			id = "Burning",
-			displayName = "Queimando",
+			displayName = "Burning",
 			icon = "Q",
 			turns = 2,
 			damagePerTurn = 5,

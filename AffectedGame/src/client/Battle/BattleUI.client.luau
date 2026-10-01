@@ -35,11 +35,10 @@ local MAIN_BUTTONS = {
 	{ text = "Focus", key = Enum.KeyCode.C, keyText = "C", fill = Color3.fromRGB(10, 80, 205), border = Color3.fromRGB(25, 105, 235), action = "Focus" },
 }
 
--- Ataques do menu Fight: texto, id da ação no servidor (FightActions) e tecla
-local SKILLS = {
-	{ text = "Normal Attack", id = "NormalAttack", key = Enum.KeyCode.One, keyText = "1" },
-	{ text = "Strong Attack", id = "StrongAttack", key = Enum.KeyCode.Two, keyText = "2" },
-}
+-- Teclas dos ataques do menu Fight (na ordem que a classe define) e a lista usada se o servidor ainda não mandou
+local SKILL_KEYS = { Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three, Enum.KeyCode.Four }
+local FALLBACK_SKILLS = { "NormalAttack", "StrongAttack" }
+local ENERGY_COLOR = Color3.fromRGB(25, 110, 235)
 
 local SKILL_COLORS = { fill = Color3.fromRGB(95, 25, 25), border = Color3.fromRGB(170, 45, 45) }
 
@@ -261,12 +260,27 @@ local function moveTooltip()
 	)
 end
 
-local function showTooltip(item)
-	tooltipName.Text = item.displayName or item.id
-	tooltipText.Text = item.description or ""
-	tooltipTarget.Text = item.target == "Enemy" and "Alvo: inimigo selecionado" or "Alvo: você"
+local function showTooltip(title: string, text: string, footer: string)
+	tooltipName.Text = title
+	tooltipText.Text = text
+	tooltipTarget.Text = footer
 	tooltip.Visible = true
 	moveTooltip()
+end
+
+local function showItemTooltip(item)
+	showTooltip(item.displayName or item.id, item.description or "", item.target == "Enemy" and "Alvo: inimigo selecionado" or "Alvo: você")
+end
+
+-- Texto de alvo e custo de uma habilidade, mostrado no rodapé do cartão de descrição
+local function skillFooter(action): string
+	local target = action.targetGroup == "Allies" and "Alvo: toda a party"
+		or action.targetGroup == "Enemies" and "Alvo: todos os inimigos"
+		or ((action.effectType or "Damage") == "Damage" and "Alvo: inimigo selecionado" or "Alvo: você")
+
+	local cost = (action.energyCost or 0) > 0 and string.format("  •  %d energia", action.energyCost) or "  •  sem custo"
+	local cooldown = (action.cooldown or 0) > 0 and string.format("  •  recarga %d", action.cooldown) or ""
+	return target .. cost .. cooldown
 end
 
 local function hideTooltip()
@@ -275,9 +289,9 @@ end
 
 local function setSkillMenu(isOpen: boolean)
 	skillRow.Visible = isOpen and isMyTurn()
+	hideTooltip()
 	if skillRow.Visible then
 		itemPanel.Visible = false
-		hideTooltip()
 	end
 end
 
@@ -373,7 +387,7 @@ local function createItemSlot(item, count: number, index: number)
 
 	slot.MouseEnter:Connect(function()
 		slot.BackgroundColor3 = COLORS.SlotHover
-		showTooltip(item)
+		showItemTooltip(item)
 	end)
 	slot.MouseMoved:Connect(moveTooltip)
 	slot.MouseLeave:Connect(function()
@@ -437,22 +451,82 @@ for order, spec in MAIN_BUTTONS do
 	end)
 end
 
+-- Barra de ataques montada a partir das habilidades da classe (Attribute "BattleSkills" mandado pelo servidor)
 local skillKeys = {}
-for order, skill in SKILLS do
-	local spec = { text = skill.text, keyText = skill.keyText, fill = SKILL_COLORS.fill, border = SKILL_COLORS.border }
-	local button, dim = createActionButton(skillRow, spec, Vector2.new(190, 50), 20, order)
-	table.insert(dimOverlays, dim)
-	skillKeys[skill.key] = skill.id
-	button.MouseButton1Click:Connect(function()
-		sendAction("Attack", skill.id)
-	end)
+local skillButtons = {}
+local skillDims = {}
+
+local function refreshSkills()
+	for _, button in skillButtons do
+		button:Destroy()
+	end
+	table.clear(skillButtons)
+	table.clear(skillDims)
+	table.clear(skillKeys)
+
+	local ok, ids = pcall(HttpService.JSONDecode, HttpService, player:GetAttribute("BattleSkills") or "")
+	if not ok or type(ids) ~= "table" or #ids == 0 then
+		ids = FALLBACK_SKILLS
+	end
+
+	for order, actionId in ids do
+		local action = Registry.Get("Actions", actionId)
+		local key = SKILL_KEYS[order]
+
+		if action and key then
+			local spec = {
+				text = action.displayName or action.id,
+				keyText = tostring(order),
+				fill = SKILL_COLORS.fill,
+				border = SKILL_COLORS.border,
+			}
+			local button, dim = createActionButton(skillRow, spec, Vector2.new(210, 50), 19, order)
+			dim.Visible = not isMyTurn()
+
+			if (action.energyCost or 0) > 0 then
+				local badge = Instance.new("Frame")
+				badge.AnchorPoint = Vector2.new(0.5, 0.5)
+				badge.Position = UDim2.new(1, -6, 0, 6)
+				badge.Size = UDim2.fromOffset(24, 24)
+				badge.Rotation = 45
+				badge.BackgroundColor3 = ENERGY_COLOR
+				badge.ZIndex = 3
+				badge.Parent = button
+				addStroke(badge, COLORS.KeyBorder, 2)
+
+				local cost = createText(button, tostring(action.energyCost), 15, 4)
+				cost.AnchorPoint = Vector2.new(0.5, 0.5)
+				cost.Position = UDim2.new(1, -6, 0, 6)
+				cost.Size = UDim2.fromOffset(24, 24)
+			end
+
+			button.MouseEnter:Connect(function()
+				showTooltip(action.displayName or action.id, action.description or "", skillFooter(action))
+			end)
+			button.MouseMoved:Connect(moveTooltip)
+			button.MouseLeave:Connect(hideTooltip)
+			button.MouseButton1Click:Connect(function()
+				sendAction("Attack", action.id)
+			end)
+
+			skillKeys[key] = action.id
+			table.insert(skillButtons, button)
+			table.insert(skillDims, dim)
+		end
+	end
 end
+
+player:GetAttributeChangedSignal("BattleSkills"):Connect(refreshSkills)
+refreshSkills()
 
 -- Escurece botões e itens fora do seu turno (o inventário continua podendo ser aberto só para olhar)
 local function refreshTurn()
 	local myTurn = isMyTurn()
 
 	for _, dim in dimOverlays do
+		dim.Visible = not myTurn
+	end
+	for _, dim in skillDims do
 		dim.Visible = not myTurn
 	end
 	for _, entry in itemSlots do

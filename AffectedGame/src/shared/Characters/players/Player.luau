@@ -38,13 +38,14 @@ local function gatherModifiers(entries, kind, ownerName)
 	return result
 end
 
--- Converte o baseStats das classes (maxHealth, attack, defense) para status fixos do Character
+-- Converte o baseStats das classes (maxHealth, attack, defense, magicAttack, healing...) para status fixos do Character
 local CLASS_STAT_KEYS = {
 	maxHealth = "MaxHealth",
 	attack = "Attack",
 	defense = "Defense",
 	magicAttack = "MagicAttack",
 	magicDefense = "MagicDefense",
+	healing = "Healing",
 }
 
 local function classStats(classDef)
@@ -106,8 +107,29 @@ function Player.new(playerLite)
 		self:OnInventoryChanged()
 	end
 	self:OnInventoryChanged()
+	self:SyncSkills()
 
 	return self
+end
+
+-- Manda ao client as ações da barra de ataques (tudo menos o Foco, que tem botão próprio), na ordem da classe
+function Player:SyncSkills()
+	local robloxPlayer = self.robloxPlayer
+	if not robloxPlayer or not robloxPlayer.Parent then
+		return
+	end
+
+	local skills = {}
+	for _, actionId in self.actions do
+		local action = Registry.Get("Actions", actionId)
+		if action and action.id ~= "Focus" then
+			table.insert(skills, action.id)
+		elseif not action then
+			warn(string.format("[Player] Ação '%s' da classe %s não existe em FightActions.", tostring(actionId), tostring(self.classId)))
+		end
+	end
+
+	robloxPlayer:SetAttribute("BattleSkills", HttpService:JSONEncode(skills))
 end
 
 -- Reação a qualquer mudança no inventário: salva no PlayerLite, reaplica relíquias e replica para o client
